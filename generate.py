@@ -32,9 +32,9 @@ def ask_claude(used):
 {{"place":"장소 이름","search":["영어 검색어1","영어 검색어2","영어 검색어3"],
 "slides":[{{"title":"","body":""}}],"caption":"인스타 본문 2~3줄","hashtags":["#여행","#풍경"]}}"""
     msg = client.messages.create(
-        model="claude-sonnet-5-5", max_tokens=1500,
+        model="claude-sonnet-5-5", max_tokens=4000,
         messages=[{"role": "user", "content": prompt}])
-    text = msg.content[0].text
+        text = "".join(b.text for b in msg.content if b.type == "text")
     text = re.sub(r"^```(?:json)?|```$", "", text.strip(), flags=re.M).strip()
     return json.loads(text)
 
