@@ -34,7 +34,7 @@ def ask_claude(used):
     msg = client.messages.create(
         model="claude-sonnet-5-5", max_tokens=4000,
         messages=[{"role": "user", "content": prompt}])
-        text = "".join(b.text for b in msg.content if b.type == "text")
+    text = "".join(b.text for b in msg.content if b.type == "text")
     text = re.sub(r"^```(?:json)?|```$", "", text.strip(), flags=re.M).strip()
     return json.loads(text)
 
