@@ -10,9 +10,13 @@ from io import BytesIO
 
 W, H = 1080, 1350
 FONT_CANDIDATES = [
+    "/usr/share/fonts/truetype/nanum/NanumGothicExtraBold.ttf",
     "/usr/share/fonts/truetype/nanum/NanumGothicBold.ttf",
+    "/usr/share/fonts/opentype/noto/NotoSansCJK-Black.ttc",
     "/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc",
 ]
+YELLOW = "#FFE600"
+GREEN = "#6BFF3D"
 
 def font(size):
     for p in FONT_CANDIDATES:
@@ -63,31 +67,46 @@ def fit_cover(img):
     return img.crop((x, y, x + W, y + H))
 
 def wrap(draw, text, fnt, max_w):
+    """단어(띄어쓰기) 단위로 줄바꿈해서 단어가 중간에 끊기지 않게 합니다."""
     lines, cur = [], ""
-    for ch in text:
-        if draw.textlength(cur + ch, font=fnt) > max_w:
-            lines.append(cur); cur = ch
-        else:
-            cur += ch
-    if cur: lines.append(cur)
+    for word in text.split(" "):
+        trial = (cur + " " + word).strip()
+        if draw.textlength(trial, font=fnt) <= max_w:
+            cur = trial
+            continue
+        if cur:
+            lines.append(cur)
+        cur = ""
+        for ch in word:  # 한 단어가 너무 길면 글자 단위로 자름
+            if draw.textlength(cur + ch, font=fnt) > max_w:
+                lines.append(cur); cur = ch
+            else:
+                cur += ch
+    if cur:
+        lines.append(cur)
     return lines
 
 def render(bg, title, body, idx, total, cover):
-    img = ImageEnhance.Brightness(fit_cover(bg)).enhance(0.55)
+    img = ImageEnhance.Brightness(fit_cover(bg)).enhance(0.9)
     d = ImageDraw.Draw(img)
-    ft = font(92 if cover else 76)
-    fb = font(46)
+    ft = font(96 if cover else 80)
+    fb = font(50)
     tl = wrap(d, title, ft, W - 160)
     bl = wrap(d, body, fb, W - 160) if body else []
-    th = len(tl) * (ft.size + 18)
-    bh = len(bl) * (fb.size + 14)
+    th = len(tl) * (ft.size + 20)
+    bh = len(bl) * (fb.size + 16)
     y = (H - th - bh - (50 if bl else 0)) // 2
-    for ln in tl:
-        d.text((80, y), ln, font=ft, fill="white", stroke_width=3, stroke_fill="black"); y += ft.size + 18
+    for n, ln in enumerate(tl):
+        # 표지는 첫 줄 노랑, 나머지 줄 초록 / 안쪽 장은 제목 노랑
+        color = YELLOW if (n == 0 or not cover) else GREEN
+        d.text((80, y), ln, font=ft, fill=color, stroke_width=6, stroke_fill="black")
+        y += ft.size + 20
     y += 50
     for ln in bl:
-        d.text((80, y), ln, font=fb, fill="#f2f2f2", stroke_width=2, stroke_fill="black"); y += fb.size + 14
-    d.text((W - 160, H - 90), f"{idx}/{total}", font=font(38), fill="white")
+        d.text((80, y), ln, font=fb, fill=GREEN, stroke_width=5, stroke_fill="black")
+        y += fb.size + 16
+    d.text((W - 170, H - 90), f"{idx}/{total}", font=font(40), fill=YELLOW,
+           stroke_width=4, stroke_fill="black")
     return img
 
 def main():
