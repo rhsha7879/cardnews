@@ -1,11 +1,11 @@
 """카드뉴스 1세트(5장)를 만드는 프로그램.
 1) Claude가 '세계 신비한 풍경' 새 장소를 골라 위치·설명까지 글을 씀
-2) Pexels에서 사진을 가져옴
-3) 사진 위에 글자를 얹어 output/ 폴더에 저장
+2) Pexels에서 장소와 가장 잘 맞는 멋진 사진을 골라 가져옴
+3) 사진 색감을 다듬고, 글자 뒤에만 부드러운 그림자를 깔아 output/ 에 저장
 """
-import json, os, re, sys, textwrap, datetime
+import json, os, re, sys, datetime
 import requests
-from PIL import Image, ImageDraw, ImageFont, ImageEnhance
+from PIL import Image, ImageDraw, ImageFont, ImageEnhance, ImageFilter
 from io import BytesIO
 
 W, H = 1080, 1350
@@ -15,8 +15,8 @@ FONT_CANDIDATES = [
     "/usr/share/fonts/opentype/noto/NotoSansCJK-Black.ttc",
     "/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc",
 ]
-YELLOW = "#FFE600"
-GREEN = "#6BFF3D"
+YELLOW = "#FFE600"   # 제목 색
+WHITE = "#FFFFFF"    # 본문·위치·쪽번호 색
 
 def font(size):
     for p in FONT_CANDIDATES:
@@ -28,7 +28,7 @@ def ask_claude(used):
     import anthropic
     client = anthropic.Anthropic()
     prompt = f"""인스타그램 카드뉴스 주제: '세계의 신비한 풍경'.
-아직 쓰지 않은 새로운 장소 1곳을 골라 5장짜리 카드뉴스를 만들어 주세요.
+보는 사람이 "꼭 가보고 싶다"고 느낄 만큼 신비롭고 압도적인 장소 1곳을 골라 5장짜리 카드뉴스를 만들어 주세요.
 이미 사용한 장소(겹치면 안 됨): {used}
 
 각 장의 역할:
@@ -40,9 +40,14 @@ def ask_claude(used):
 2~5장: title은 16자 이내, body는 100자 이내, 쉬운 문장으로 쓰세요.
 사실이 확실한 내용만 쓰고, 정확한 숫자가 불확실하면 '약'을 붙이거나 숫자를 빼세요.
 
+사진 검색어(search)는 영어로 정확히 4개 쓰세요. 모두 장소의 영어 이름을 포함하고,
+전문 사진작가가 찍은 듯한 분위기가 나도록 서로 다른 구도를 담으세요.
+예: "<place> aerial drone view", "<place> sunrise golden hour", "<place> dramatic sky landscape", "<place> night stars".
+place_en은 사진 설명에 흔히 쓰이는 영어 장소 이름(예: Uyuni Salt Flat)입니다.
+
 반드시 아래 JSON만 출력하세요(설명 금지):
-{{"place":"장소 이름","country":"나라","region":"도시 또는 지역",
-"search":["영어 검색어1","영어 검색어2","영어 검색어3"],
+{{"place":"장소 이름","place_en":"English place name","country":"나라","region":"도시 또는 지역",
+"search":["영어 검색어1","영어 검색어2","영어 검색어3","영어 검색어4"],
 "slides":[{{"title":"","body":""}}],
 "caption":"인스타 본문 4~6줄(위치, 한 줄 소개, 방문 팁 포함)",
 "hashtags":["#여행","#풍경"]}}"""
@@ -53,29 +58,51 @@ def ask_claude(used):
     text = re.sub(r"^```(?:json)?|```$", "", text.strip(), flags=re.M).strip()
     return json.loads(text)
 
-def get_photos(queries, n):
+def get_photos(queries, place_en, n):
+    """여러 검색어로 후보를 모은 뒤, 장소 이름이 사진 설명에 들어 있고 해상도가 큰 사진을 우선 고릅니다."""
     headers = {"Authorization": os.environ["PEXELS_API_KEY"]}
-    urls = []
+    words = [w.lower() for w in re.findall(r"[A-Za-z]+", place_en) if len(w) > 2]
+    cands = {}
     for q in queries:
         r = requests.get("https://api.pexels.com/v1/search", headers=headers,
-                         params={"query": q, "orientation": "portrait", "per_page": 5}, timeout=30)
+                         params={"query": q, "orientation": "portrait", "per_page": 15}, timeout=30)
         r.raise_for_status()
         for p in r.json().get("photos", []):
-            u = p["src"]["large2x"]
-            if u not in urls:
-                urls.append(u)
-    if not urls:
+            alt = (p.get("alt") or "").lower()
+            score = sum(1 for w in words if w in alt) * 10
+            score += min(p.get("width", 0), 4000) / 1000  # 큰 사진일수록 가산점
+            if p["id"] not in cands or score > cands[p["id"]][0]:
+                cands[p["id"]] = (score, p["src"])
+    if not cands:
         raise RuntimeError("사진을 찾지 못했어요")
-    while len(urls) < n:
-        urls += urls
-    return urls[:n]
+    ranked = [src for _, src in sorted(cands.values(), key=lambda x: -x[0])]
+    while len(ranked) < n:
+        ranked += ranked
+    return ranked[:n]
+
+def download(src):
+    """고화질 원본을 카드 크기로 줄여서 받고, 실패하면 보통 화질로 받습니다."""
+    for url in (src["original"] + f"?auto=compress&cs=tinysrgb&fit=crop&w={W}&h={H}", src["large2x"]):
+        try:
+            r = requests.get(url, timeout=60)
+            r.raise_for_status()
+            return Image.open(BytesIO(r.content))
+        except Exception:
+            continue
+    raise RuntimeError("사진을 내려받지 못했어요")
 
 def fit_cover(img):
     img = img.convert("RGB")
     s = max(W / img.width, H / img.height)
-    img = img.resize((int(img.width * s), int(img.height * s)))
+    img = img.resize((int(img.width * s), int(img.height * s)), Image.LANCZOS)
     x, y = (img.width - W) // 2, (img.height - H) // 2
     return img.crop((x, y, x + W, y + H))
+
+def grade(img):
+    """사진작가 보정 느낌: 색을 선명하게, 대비를 살짝 높임."""
+    img = ImageEnhance.Color(img).enhance(1.18)
+    img = ImageEnhance.Contrast(img).enhance(1.08)
+    return img
 
 def wrap(draw, text, fnt, max_w):
     """단어(띄어쓰기) 단위로 줄바꿈해서 단어가 중간에 끊기지 않게 합니다."""
@@ -88,7 +115,7 @@ def wrap(draw, text, fnt, max_w):
         if cur:
             lines.append(cur)
         cur = ""
-        for ch in word:  # 한 단어가 너무 길면 글자 단위로 자름
+        for ch in word:
             if draw.textlength(cur + ch, font=fnt) > max_w:
                 lines.append(cur); cur = ch
             else:
@@ -97,30 +124,46 @@ def wrap(draw, text, fnt, max_w):
         lines.append(cur)
     return lines
 
+def shade(img, top_y, bottom_y):
+    """글자가 있는 아래쪽과 위치가 있는 위쪽에만 부드러운 어두운 그라데이션을 깔아 사진은 밝게 유지."""
+    ov = Image.new("L", (W, H), 0)
+    px = ov.load()
+    for y in range(H):
+        a = 0
+        if y < 230:                                   # 위쪽(위치 글자 뒤)
+            a = max(a, int(130 * (1 - y / 230)))
+        if y > top_y - 260:                           # 글자 덩어리 위쪽부터 서서히
+            t = min(1.0, (y - (top_y - 260)) / 260)
+            a = max(a, int(185 * t))
+        for x in range(0, W, 1):
+            px[x, y] = a
+    black = Image.new("RGB", (W, H), (0, 0, 0))
+    return Image.composite(black, img, ov)
+
 def render(bg, title, body, idx, total, cover, location=""):
-    img = ImageEnhance.Brightness(fit_cover(bg)).enhance(0.9)
-    d = ImageDraw.Draw(img)
+    img = grade(fit_cover(bg))
+    probe = ImageDraw.Draw(img)
     ft = font(96 if cover else 80)
     fb = font(54 if cover else 46)
-    tl = wrap(d, title, ft, W - 160)
-    bl = wrap(d, body, fb, W - 160) if body else []
+    tl = wrap(probe, title, ft, W - 160)
+    bl = wrap(probe, body, fb, W - 160) if body else []
     th = len(tl) * (ft.size + 20)
     bh = len(bl) * (fb.size + 16)
-    y = (H - th - bh - (50 if bl else 0)) // 2
-    # 위쪽에 위치 표시 (모든 장)
+    block = th + bh + (40 if bl else 0)
+    y = H - 150 - block                      # 글자 덩어리를 아래쪽에 두어 사진이 잘 보이게
+    img = shade(img, y, H)
+    d = ImageDraw.Draw(img)
     if location:
-        d.text((80, 70), "위치  " + location, font=font(40), fill=GREEN,
-               stroke_width=5, stroke_fill="black")
-    for n, ln in enumerate(tl):
-        # 표지는 첫 줄 노랑, 나머지 줄 초록 / 안쪽 장은 제목 노랑
-        color = YELLOW if (n == 0 or not cover) else GREEN
-        d.text((80, y), ln, font=ft, fill=color, stroke_width=6, stroke_fill="black")
+        d.text((80, 70), "위치  " + location, font=font(40), fill=WHITE,
+               stroke_width=4, stroke_fill="black")
+    for ln in tl:                            # 제목만 노랑
+        d.text((80, y), ln, font=ft, fill=YELLOW, stroke_width=6, stroke_fill="black")
         y += ft.size + 20
-    y += 50
-    for ln in bl:
-        d.text((80, y), ln, font=fb, fill=GREEN, stroke_width=5, stroke_fill="black")
+    y += 40
+    for ln in bl:                            # 본문은 흰색
+        d.text((80, y), ln, font=fb, fill=WHITE, stroke_width=4, stroke_fill="black")
         y += fb.size + 16
-    d.text((W - 170, H - 90), f"{idx}/{total}", font=font(40), fill=YELLOW,
+    d.text((W - 170, H - 90), f"{idx}/{total}", font=font(40), fill=WHITE,
            stroke_width=4, stroke_fill="black")
     return img
 
@@ -129,14 +172,13 @@ def main():
     data = ask_claude(used[-100:])
     slides = data["slides"][:5]
     location = f'{data.get("country", "")} · {data.get("region", "")}'.strip(" ·")
-    photos = get_photos(data["search"], len(slides))
+    photos = get_photos(data["search"], data.get("place_en", data["place"]), len(slides))
     stamp = datetime.datetime.utcnow().strftime("%Y%m%d-%H%M%S")
     out = os.path.join("output", stamp)
     os.makedirs(out, exist_ok=True)
-    for i, (s, u) in enumerate(zip(slides, photos), 1):
-        bg = Image.open(BytesIO(requests.get(u, timeout=60).content))
-        render(bg, s["title"], s["body"], i, len(slides), i == 1, location).save(
-            os.path.join(out, f"slide_{i}.jpg"), quality=92)
+    for i, (s, src) in enumerate(zip(slides, photos), 1):
+        render(download(src), s["title"], s["body"], i, len(slides), i == 1, location).save(
+            os.path.join(out, f"slide_{i}.jpg"), quality=93)
     caption = data["caption"] + "\n\n" + " ".join(data["hashtags"])
     json.dump({"place": data["place"], "location": location, "caption": caption,
                "count": len(slides)},
