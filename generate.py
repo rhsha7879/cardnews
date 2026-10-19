@@ -1,5 +1,5 @@
 """카드뉴스 1세트(5장)를 만드는 프로그램.
-1) Claude가 '세계 신비한 풍경' 새 장소를 골라 위치·설명까지 글을 씀
+1) '세계 여행·문화' 안의 여러 주제를 돌아가며, Claude가 새 장소를 골라 위치·설명까지 글을 씀
 2) Pexels에서 장소와 가장 잘 맞는 멋진 사진을 골라 가져옴
 3) 사진 색감을 다듬고, 글자 뒤에만 부드러운 그림자를 깔아 output/ 에 저장
 """
@@ -15,6 +15,28 @@ FONT_CANDIDATES = [
     "/usr/share/fonts/opentype/noto/NotoSansCJK-Black.ttc",
     "/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc",
 ]
+# 주제 목록: 실행할 때마다 위에서부터 하나씩 돌아가며 씁니다.
+# 바꾸고 싶으면 저장소에 topics.txt 파일을 만들어 한 줄에 주제 하나씩 적으세요.
+DEFAULT_TOPICS = [
+    "신비한 자연 풍경",
+    "세계 축제와 행사",
+    "이색 음식과 시장",
+    "전통 문화와 의상",
+    "역사 유적과 고대 도시",
+    "이색 마을과 건축",
+    "야경이 아름다운 도시",
+    "신기한 자연 현상",
+    "세계의 사원과 성지",
+    "비밀스러운 섬과 해변",
+]
+
+def load_topics():
+    if os.path.exists("topics.txt"):
+        lines = [l.strip() for l in open("topics.txt", encoding="utf-8") if l.strip()]
+        if lines:
+            return lines
+    return DEFAULT_TOPICS
+
 YELLOW = "#FFE600"   # 제목 색
 WHITE = "#FFFFFF"    # 본문·위치·쪽번호 색
 
@@ -24,25 +46,27 @@ def font(size):
             return ImageFont.truetype(p, size)
     raise RuntimeError("한글 폰트를 찾지 못했어요")
 
-def ask_claude(used):
+def ask_claude(used, topic):
     import anthropic
     client = anthropic.Anthropic()
-    prompt = f"""인스타그램 카드뉴스 주제: '세계의 신비한 풍경'.
-보는 사람이 "꼭 가보고 싶다"고 느낄 만큼 신비롭고 압도적인 장소 1곳을 골라 5장짜리 카드뉴스를 만들어 주세요.
+    prompt = f"""인스타그램 카드뉴스 큰 주제: '세계 여행·문화'.
+이번 세부 주제: '{topic}'.
+이 세부 주제에 딱 맞으면서, 보는 사람이 "꼭 가보고 싶다, 직접 경험해 보고 싶다"고 느낄 만큼 매력적인 장소(또는 그곳의 문화) 1곳을 골라 5장짜리 카드뉴스를 만들어 주세요.
 이미 사용한 장소(겹치면 안 됨): {used}
 
 각 장의 역할:
 1장(표지): title은 호기심을 끄는 제목(16자 이내), body는 한 줄 소개(35자 이내)
-2장: 어떤 곳인가 (나라, 지역, 어떤 풍경인지 알기 쉽게)
-3장: 왜 특별한가 (이 풍경이 생긴 이유나 놀라운 사실)
-4장: 가는 법과 방문하기 좋은 시기, 알아두면 좋은 팁
+2장: 어디에 있는 무엇인가 (나라, 지역, 어떤 곳·어떤 문화인지 알기 쉽게)
+3장: 왜 특별한가 (유래, 역사, 문화적 배경, 놀라운 사실)
+4장: 직접 즐기는 법 (가는 법, 방문하기 좋은 시기, 꼭 해볼 것, 알아두면 좋은 팁)
 5장: 마무리 한마디와 '저장해 두고 다음 여행 때 보세요' 같은 저장 유도 문구
 2~5장: title은 16자 이내, body는 100자 이내, 쉬운 문장으로 쓰세요.
 사실이 확실한 내용만 쓰고, 정확한 숫자가 불확실하면 '약'을 붙이거나 숫자를 빼세요.
+종교·민족·문화를 존중하는 표현을 쓰고, 비하하거나 고정관념을 담지 마세요.
 
 사진 검색어(search)는 영어로 정확히 4개 쓰세요. 모두 장소의 영어 이름을 포함하고,
-전문 사진작가가 찍은 듯한 분위기가 나도록 서로 다른 구도를 담으세요.
-예: "<place> aerial drone view", "<place> sunrise golden hour", "<place> dramatic sky landscape", "<place> night stars".
+이 주제에 어울리는 서로 다른 구도를 담으세요(예: 전체 전경, 분위기가 살아 있는 장면, 디테일, 해 질 녘이나 밤 풍경).
+전문 사진작가가 찍은 듯한 사진이 검색되도록 'aerial', 'golden hour', 'dramatic', 'travel photography' 같은 단어를 적절히 섞으세요.
 place_en은 사진 설명에 흔히 쓰이는 영어 장소 이름(예: Uyuni Salt Flat)입니다.
 
 반드시 아래 JSON만 출력하세요(설명 금지):
@@ -50,7 +74,7 @@ place_en은 사진 설명에 흔히 쓰이는 영어 장소 이름(예: Uyuni Sa
 "search":["영어 검색어1","영어 검색어2","영어 검색어3","영어 검색어4"],
 "slides":[{{"title":"","body":""}}],
 "caption":"인스타 본문 4~6줄(위치, 한 줄 소개, 방문 팁 포함)",
-"hashtags":["#여행","#풍경"]}}"""
+"hashtags":["#여행","#세계여행"]}}"""
     msg = client.messages.create(
         model="claude-sonnet-5-5", max_tokens=4000,
         messages=[{"role": "user", "content": prompt}])
@@ -169,7 +193,9 @@ def render(bg, title, body, idx, total, cover, location=""):
 
 def main():
     used = json.load(open("used_topics.json", encoding="utf-8"))
-    data = ask_claude(used[-100:])
+    topics = load_topics()
+    topic = topics[len(used) % len(topics)]      # 실행할 때마다 다음 주제로
+    data = ask_claude(used[-100:], topic)
     slides = data["slides"][:5]
     location = f'{data.get("country", "")} · {data.get("region", "")}'.strip(" ·")
     photos = get_photos(data["search"], data.get("place_en", data["place"]), len(slides))
@@ -180,13 +206,13 @@ def main():
         render(download(src), s["title"], s["body"], i, len(slides), i == 1, location).save(
             os.path.join(out, f"slide_{i}.jpg"), quality=93)
     caption = data["caption"] + "\n\n" + " ".join(data["hashtags"])
-    json.dump({"place": data["place"], "location": location, "caption": caption,
+    json.dump({"topic": topic, "place": data["place"], "location": location, "caption": caption,
                "count": len(slides)},
               open(os.path.join(out, "meta.json"), "w", encoding="utf-8"), ensure_ascii=False)
     used.append(data["place"])
     json.dump(used, open("used_topics.json", "w", encoding="utf-8"), ensure_ascii=False)
     open("latest_dir.txt", "w").write(out)
-    print("완료:", out, data["place"])
+    print("완료:", out, topic, "-", data["place"])
 
 if __name__ == "__main__":
     main()
