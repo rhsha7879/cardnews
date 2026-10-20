@@ -5,7 +5,7 @@
 """
 import json, os, re, sys, datetime
 import requests
-from PIL import Image, ImageDraw, ImageFont, ImageEnhance, ImageFilter
+from PIL import Image, ImageDraw, ImageFont, ImageEnhance, ImageFilter, ImageChops, ImageCms
 from io import BytesIO
 
 W, H = 1080, 1350
@@ -55,12 +55,12 @@ def ask_claude(used, topic):
 이미 사용한 장소(겹치면 안 됨): {used}
 
 각 장의 역할:
-1장(표지): title은 호기심을 끄는 제목(16자 이내), body는 한 줄 소개(35자 이내)
+1장(표지): title은 호기심을 끄는 제목(14자 이내), body는 한 줄 소개(30자 이내)
 2장: 어디에 있는 무엇인가 (나라, 지역, 어떤 곳·어떤 문화인지 알기 쉽게)
 3장: 왜 특별한가 (유래, 역사, 문화적 배경, 놀라운 사실)
 4장: 직접 즐기는 법 (가는 법, 방문하기 좋은 시기, 꼭 해볼 것, 알아두면 좋은 팁)
 5장: 마무리 한마디와 '저장해 두고 다음 여행 때 보세요' 같은 저장 유도 문구
-2~5장: title은 16자 이내, body는 100자 이내, 쉬운 문장으로 쓰세요.
+2~5장: title은 14자 이내, body는 80자 이내, 쉬운 문장으로 핵심만 쓰세요.
 사실이 확실한 내용만 쓰고, 정확한 숫자가 불확실하면 '약'을 붙이거나 숫자를 빼세요.
 종교·민족·문화를 존중하는 표현을 쓰고, 비하하거나 고정관념을 담지 마세요.
 
@@ -89,12 +89,17 @@ def get_photos(queries, place_en, n):
     cands = {}
     for q in queries:
         r = requests.get("https://api.pexels.com/v1/search", headers=headers,
-                         params={"query": q, "orientation": "portrait", "per_page": 15}, timeout=30)
+                         params={"query": q, "orientation": "portrait", "per_page": 30}, timeout=30)
         r.raise_for_status()
         for p in r.json().get("photos", []):
             alt = (p.get("alt") or "").lower()
-            score = sum(1 for w in words if w in alt) * 10
-            score += min(p.get("width", 0), 4000) / 1000  # 큰 사진일수록 가산점
+            w, h = p.get("width", 0), p.get("height", 0)
+            score = sum(1 for x in words if x in alt) * 10
+            score += min(w, 4000) / 1000                      # 큰 사진일수록 가산점
+            if w < 1600 or h < 2000:                          # 화질이 낮은 사진은 큰 감점
+                score -= 15
+            if h and abs(w / h - 0.8) < 0.08:                 # 4:5 비율에 가까우면 덜 잘려서 가산점
+                score += 1.5
             if p["id"] not in cands or score > cands[p["id"]][0]:
                 cands[p["id"]] = (score, p["src"])
     if not cands:
@@ -104,13 +109,28 @@ def get_photos(queries, place_en, n):
         ranked += ranked
     return ranked[:n]
 
-def download(src):
-    """고화질 원본을 카드 크기로 줄여서 받고, 실패하면 보통 화질로 받습니다."""
-    for url in (src["original"] + f"?auto=compress&cs=tinysrgb&fit=crop&w={W}&h={H}", src["large2x"]):
+def to_srgb(im):
+    """사진에 들어 있는 색 정보를 인스타 표준 색(sRGB)으로 맞춥니다."""
+    im = im.convert("RGB") if im.mode != "RGB" else im
+    icc = im.info.get("icc_profile")
+    if icc:
         try:
-            r = requests.get(url, timeout=60)
+            src = ImageCms.ImageCmsProfile(BytesIO(icc))
+            dst = ImageCms.createProfile("sRGB")
+            im = ImageCms.profileToProfile(im, src, dst, outputMode="RGB")
+        except Exception:
+            pass
+    return im
+
+def download(src):
+    """압축하지 않은 고화질 원본을 받아서, 카드 크기보다 크게 읽은 뒤 나중에 줄입니다."""
+    for url in (src["original"], src["large2x"]):
+        try:
+            r = requests.get(url, timeout=120)
             r.raise_for_status()
-            return Image.open(BytesIO(r.content))
+            im = Image.open(BytesIO(r.content))
+            im.draft("RGB", (W * 2, H * 2))   # 아주 큰 사진도 메모리 걱정 없이, 최소 2배 크기로 읽기
+            return to_srgb(im)
         except Exception:
             continue
     raise RuntimeError("사진을 내려받지 못했어요")
@@ -118,14 +138,16 @@ def download(src):
 def fit_cover(img):
     img = img.convert("RGB")
     s = max(W / img.width, H / img.height)
-    img = img.resize((int(img.width * s), int(img.height * s)), Image.LANCZOS)
+    img = img.resize((int(img.width * s + 0.5), int(img.height * s + 0.5)), Image.LANCZOS)
     x, y = (img.width - W) // 2, (img.height - H) // 2
-    return img.crop((x, y, x + W, y + H))
+    img = img.crop((x, y, x + W, y + H))
+    # 줄이면서 흐려진 윤곽을 아주 약하게 또렷하게
+    return img.filter(ImageFilter.UnsharpMask(radius=1.0, percent=45, threshold=2))
 
 def grade(img):
-    """사진작가 보정 느낌: 색을 선명하게, 대비를 살짝 높임."""
-    img = ImageEnhance.Color(img).enhance(1.18)
-    img = ImageEnhance.Contrast(img).enhance(1.08)
+    """자연스러운 보정: 색을 조금만 선명하게, 대비를 살짝 높임."""
+    img = ImageEnhance.Color(img).enhance(1.10)
+    img = ImageEnhance.Contrast(img).enhance(1.05)
     return img
 
 def wrap(draw, text, fnt, max_w):
@@ -148,47 +170,57 @@ def wrap(draw, text, fnt, max_w):
         lines.append(cur)
     return lines
 
-def shade(img, top_y, bottom_y):
-    """글자가 있는 아래쪽과 위치가 있는 위쪽에만 부드러운 어두운 그라데이션을 깔아 사진은 밝게 유지."""
-    ov = Image.new("L", (W, H), 0)
-    px = ov.load()
-    for y in range(H):
-        a = 0
-        if y < 230:                                   # 위쪽(위치 글자 뒤)
-            a = max(a, int(130 * (1 - y / 230)))
-        if y > top_y - 260:                           # 글자 덩어리 위쪽부터 서서히
-            t = min(1.0, (y - (top_y - 260)) / 260)
-            a = max(a, int(185 * t))
-        for x in range(0, W, 1):
-            px[x, y] = a
-    black = Image.new("RGB", (W, H), (0, 0, 0))
-    return Image.composite(black, img, ov)
+def shade(img, zone_top):
+    """글자 뒤 아래쪽과 위쪽 가장자리에만 아주 부드러운 어두운 그라데이션을 깔아 사진 대부분은 그대로 둡니다."""
+    gh = H - zone_top
+    g = Image.linear_gradient("L").resize((W, gh))
+    bottom = g.point(lambda v: int(175 * ((v / 255) ** 1.6)))
+    mask = Image.new("L", (W, H), 0)
+    mask.paste(bottom, (0, zone_top))
+    gt = Image.linear_gradient("L").transpose(Image.FLIP_TOP_BOTTOM).resize((W, 190))
+    top = Image.new("L", (W, H), 0)
+    top.paste(gt.point(lambda v: int(85 * ((v / 255) ** 1.5))), (0, 0))
+    mask = ImageChops.lighter(mask, top)
+    return Image.composite(Image.new("RGB", (W, H), (0, 0, 0)), img, mask)
 
 def render(bg, title, body, idx, total, cover, location=""):
     img = grade(fit_cover(bg))
     probe = ImageDraw.Draw(img)
-    ft = font(96 if cover else 80)
-    fb = font(54 if cover else 46)
-    tl = wrap(probe, title, ft, W - 160)
-    bl = wrap(probe, body, fb, W - 160) if body else []
-    th = len(tl) * (ft.size + 20)
-    bh = len(bl) * (fb.size + 16)
-    block = th + bh + (40 if bl else 0)
-    y = H - 150 - block                      # 글자 덩어리를 아래쪽에 두어 사진이 잘 보이게
-    img = shade(img, y, H)
-    d = ImageDraw.Draw(img)
+    pad = 70
+    ft = font(78 if cover else 58)       # 제목 (이전보다 작게)
+    fb = font(38 if cover else 36)       # 본문 (이전보다 작게)
+    tl = wrap(probe, title, ft, W - pad * 2)
+    bl = wrap(probe, body, fb, W - pad * 2) if body else []
+    t_lh, b_lh = int(ft.size * 1.22), int(fb.size * 1.5)
+    block = len(tl) * t_lh + (18 + len(bl) * b_lh if bl else 0)
+    y0 = H - 100 - block                 # 글자 덩어리를 맨 아래쪽에 모음
+    img = shade(img, max(0, y0 - 230))
+
+    items = []                           # (x, y, 글자, 글꼴, 색)
+    f_loc, f_pg = font(30), font(28)
     if location:
-        d.text((80, 70), "위치  " + location, font=font(40), fill=WHITE,
-               stroke_width=4, stroke_fill="black")
-    for ln in tl:                            # 제목만 노랑
-        d.text((80, y), ln, font=ft, fill=YELLOW, stroke_width=6, stroke_fill="black")
-        y += ft.size + 20
-    y += 40
-    for ln in bl:                            # 본문은 흰색
-        d.text((80, y), ln, font=fb, fill=WHITE, stroke_width=4, stroke_fill="black")
-        y += fb.size + 16
-    d.text((W - 170, H - 90), f"{idx}/{total}", font=font(40), fill=WHITE,
-           stroke_width=4, stroke_fill="black")
+        items.append((pad, 62, "위치  " + location, f_loc, WHITE))
+    pg = f"{idx} / {total}"
+    items.append((W - pad - int(probe.textlength(pg, font=f_pg)), 64, pg, f_pg, WHITE))
+    y = y0
+    for ln in tl:
+        items.append((pad, y, ln, ft, YELLOW)); y += t_lh
+    y += 18
+    for ln in bl:
+        items.append((pad, y, ln, fb, WHITE)); y += b_lh
+
+    # 부드러운 그림자 (굵은 검정 테두리 대신)
+    sh = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    sd = ImageDraw.Draw(sh)
+    for x, yy, t, f, c in items:
+        sd.text((x + 1, yy + 3), t, font=f, fill=(0, 0, 0, 190))
+    sh = sh.filter(ImageFilter.GaussianBlur(6))
+    img = Image.alpha_composite(img.convert("RGBA"), sh).convert("RGB")
+
+    d = ImageDraw.Draw(img)
+    d.rectangle((pad, y0 - 26, pad + 56, y0 - 21), fill=YELLOW)   # 제목 위 노란 포인트 줄
+    for x, yy, t, f, c in items:
+        d.text((x, yy), t, font=f, fill=c)
     return img
 
 def main():
@@ -204,7 +236,7 @@ def main():
     os.makedirs(out, exist_ok=True)
     for i, (s, src) in enumerate(zip(slides, photos), 1):
         render(download(src), s["title"], s["body"], i, len(slides), i == 1, location).save(
-            os.path.join(out, f"slide_{i}.jpg"), quality=93)
+            os.path.join(out, f"slide_{i}.jpg"), quality=95, subsampling=0, optimize=True)
     caption = data["caption"] + "\n\n" + " ".join(data["hashtags"])
     json.dump({"topic": topic, "place": data["place"], "location": location, "caption": caption,
                "count": len(slides)},
