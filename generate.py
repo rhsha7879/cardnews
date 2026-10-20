@@ -9,6 +9,18 @@ from PIL import Image, ImageDraw, ImageFont, ImageEnhance, ImageFilter, ImageCho
 from io import BytesIO
 
 W, H = 1080, 1350
+
+# ===== 여기 숫자와 글만 바꾸면 카드 모양이 달라져요 =====
+COVER_TITLE_SIZE = 78   # 1장(표지) 제목 글자 크기
+TITLE_SIZE = 58         # 2~5장 제목 글자 크기
+COVER_BODY_SIZE = 38    # 1장 소개 글자 크기
+BODY_SIZE = 36          # 2~5장 본문 글자 크기
+BOTTOM_SHADE = 205      # 아래쪽 어두운 정도 (0~255, 클수록 글자는 잘 보이고 사진은 어두워져요)
+TOP_SHADE = 120         # 위쪽 '위치' 글자 뒤 어두운 정도 (0~255)
+# 인스타 본문 맨 아래에 붙는 안내 문구. 지우고 싶으면 따옴표 안을 비우세요: ""
+PHOTO_NOTE = "※ 사진은 분위기를 보여주는 참고 이미지이며, 실제 장소와 다를 수 있어요."
+# =========================================================
+
 FONT_CANDIDATES = [
     "/usr/share/fonts/truetype/nanum/NanumGothicExtraBold.ttf",
     "/usr/share/fonts/truetype/nanum/NanumGothicBold.ttf",
@@ -53,6 +65,7 @@ def ask_claude(used, topic):
 이번 세부 주제: '{topic}'.
 이 세부 주제에 딱 맞으면서, 보는 사람이 "꼭 가보고 싶다, 직접 경험해 보고 싶다"고 느낄 만큼 매력적인 장소(또는 그곳의 문화) 1곳을 골라 5장짜리 카드뉴스를 만들어 주세요.
 이미 사용한 장소(겹치면 안 됨): {used}
+사진 사이트에서 실제 사진이 충분히 나올 만큼 널리 알려진 장소를 고르세요(작은 가게보다 유명한 명소·거리·시장·축제 위주).
 
 각 장의 역할:
 1장(표지): title은 호기심을 끄는 제목(14자 이내), body는 한 줄 소개(30자 이내)
@@ -174,12 +187,12 @@ def shade(img, zone_top):
     """글자 뒤 아래쪽과 위쪽 가장자리에만 아주 부드러운 어두운 그라데이션을 깔아 사진 대부분은 그대로 둡니다."""
     gh = H - zone_top
     g = Image.linear_gradient("L").resize((W, gh))
-    bottom = g.point(lambda v: int(175 * ((v / 255) ** 1.6)))
+    bottom = g.point(lambda v: int(BOTTOM_SHADE * ((v / 255) ** 1.5)))
     mask = Image.new("L", (W, H), 0)
     mask.paste(bottom, (0, zone_top))
-    gt = Image.linear_gradient("L").transpose(Image.FLIP_TOP_BOTTOM).resize((W, 190))
+    gt = Image.linear_gradient("L").transpose(Image.FLIP_TOP_BOTTOM).resize((W, 230))
     top = Image.new("L", (W, H), 0)
-    top.paste(gt.point(lambda v: int(85 * ((v / 255) ** 1.5))), (0, 0))
+    top.paste(gt.point(lambda v: int(TOP_SHADE * ((v / 255) ** 1.4))), (0, 0))
     mask = ImageChops.lighter(mask, top)
     return Image.composite(Image.new("RGB", (W, H), (0, 0, 0)), img, mask)
 
@@ -187,14 +200,14 @@ def render(bg, title, body, idx, total, cover, location=""):
     img = grade(fit_cover(bg))
     probe = ImageDraw.Draw(img)
     pad = 70
-    ft = font(78 if cover else 58)       # 제목 (이전보다 작게)
-    fb = font(38 if cover else 36)       # 본문 (이전보다 작게)
+    ft = font(COVER_TITLE_SIZE if cover else TITLE_SIZE)
+    fb = font(COVER_BODY_SIZE if cover else BODY_SIZE)
     tl = wrap(probe, title, ft, W - pad * 2)
     bl = wrap(probe, body, fb, W - pad * 2) if body else []
     t_lh, b_lh = int(ft.size * 1.22), int(fb.size * 1.5)
     block = len(tl) * t_lh + (18 + len(bl) * b_lh if bl else 0)
     y0 = H - 100 - block                 # 글자 덩어리를 맨 아래쪽에 모음
-    img = shade(img, max(0, y0 - 230))
+    img = shade(img, max(0, y0 - 280))
 
     items = []                           # (x, y, 글자, 글꼴, 색)
     f_loc, f_pg = font(30), font(28)
@@ -237,7 +250,7 @@ def main():
     for i, (s, src) in enumerate(zip(slides, photos), 1):
         render(download(src), s["title"], s["body"], i, len(slides), i == 1, location).save(
             os.path.join(out, f"slide_{i}.jpg"), quality=95, subsampling=0, optimize=True)
-    caption = data["caption"] + "\n\n" + " ".join(data["hashtags"])
+    caption = data["caption"] + ("\n\n" + PHOTO_NOTE if PHOTO_NOTE else "") + "\n\n" + " ".join(data["hashtags"])
     json.dump({"topic": topic, "place": data["place"], "location": location, "caption": caption,
                "count": len(slides)},
               open(os.path.join(out, "meta.json"), "w", encoding="utf-8"), ensure_ascii=False)
