@@ -83,7 +83,7 @@ def ask_claude(used, topic):
 place_en은 사진 설명에 흔히 쓰이는 영어 장소 이름(예: Uyuni Salt Flat)입니다.
 
 반드시 아래 JSON만 출력하세요(설명 금지):
-{{"place":"장소 이름","place_en":"English place name","country":"나라","region":"도시 또는 지역",
+{{"place":"장소 이름","place_en":"English place name","country":"나라 이름만, 예: 영국","region":"도시나 지역 이름만 짧게, 나라 이름은 반복하지 말 것",
 "search":["영어 검색어1","영어 검색어2","영어 검색어3","영어 검색어4"],
 "slides":[{{"title":"","body":""}}],
 "caption":"인스타 본문 4~6줄(위치, 한 줄 소개, 방문 팁 포함)",
